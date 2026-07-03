@@ -30,7 +30,7 @@ def save_data(df):
 
 # 페이지 와이드 모드 설정
 style.set_page_config(layout="wide")
-style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템")
+style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템 by 박종현")
 
 # 데이터 로드
 df = load_data()
