@@ -7,7 +7,7 @@ from streamlit_gsheets import GSheetsConnection  # 구글 시트 라이브러리
 
 # 💡 구글 시트 연결 설정 (구글 시트 URL을 지정)
 # 실제 배포 시에는 아래 URL 칸에 본인의 구글 시트 주소를 넣거나 secrets 기능을 사용합니다.
-GSHEET_URL = "https://docs.google.com/spreadsheets/d/이곳에_본인의_구글시트_ID_입력/edit?usp=sharing"
+GSHEET_URL = "https://docs.google.com/spreadsheets/d/12i27S6rTm_scIeUQ1k7MbSCHpr_qrhkhrB8yhxU0JQg/edit?usp=drive_link"
 conn = style.connection("gsheets", type=GSheetsConnection)
 
 # 데이터 불러오기 함수 (구글 시트에서 읽기)
