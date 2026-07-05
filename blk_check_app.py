@@ -3,37 +3,40 @@ import pandas as pd
 import os
 from datetime import datetime
 import plotly.express as px
+from streamlit_gsheets import GSheetsConnection  # 구글 시트 라이브러리 추가
 
-# 1. 기본 설정 및 데이터 파일 경로
-DB_FILE = 'blk_chk_list.xlsx'
+# 💡 구글 시트 연결 설정 (구글 시트 URL을 지정)
+# 실제 배포 시에는 아래 URL 칸에 본인의 구글 시트 주소를 넣거나 secrets 기능을 사용합니다.
+GSHEET_URL = "https://docs.google.com/spreadsheets/d/이곳에_본인의_구글시트_ID_입력/edit?usp=sharing"
+conn = style.connection("gsheets", type=GSheetsConnection)
 
-# 데이터 불러오기 함수
+# 데이터 불러오기 함수 (구글 시트에서 읽기)
 def load_data():
-    if os.path.exists(DB_FILE):
-        try:
-            df = pd.read_excel(DB_FILE)
-            df['호선'] = df['호선'].astype(str).str.strip()
-            df['블록'] = df['블록'].astype(str).str.strip()
-            
-            # 날짜 형식 변환
-            df['등록일'] = pd.to_datetime(df['등록일']).dt.date
-            df['완료일'] = pd.to_datetime(df['완료일']).dt.date
-            return df
-        except Exception as e:
-            return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
-    else:
+    try:
+        # 구글 시트 데이터를 판다스 데이터프레임으로 로드
+        df = conn.read(spreadsheet=GSHEET_URL, ttl="0d") # ttl="0d"는 캐시 없이 실시간 조회를 의미
+        df['호선'] = df['호선'].astype(str).str.strip()
+        df['블록'] = df['블록'].astype(str).str.strip()
+        df['등록일'] = pd.to_datetime(df['등록일']).dt.date
+        df['완료일'] = pd.to_datetime(df['완료일']).dt.date
+        return df
+    except Exception as e:
         return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
 
-# 데이터 저장 함수
+# 데이터 저장 함수 (구글 시트에 쓰기)
 def save_data(df):
-    df.to_excel(DB_FILE, index=False)
+    # 날짜 형식을 문자열로 변환하여 저장 안정성 확보
+    df_to_save = df.copy()
+    df_to_save['등록일'] = df_to_save['등록일'].astype(str)
+    df_to_save['완료일'] = df_to_save['완료일'].apply(lambda x: str(x) if pd.notna(x) else "")
+    conn.update(spreadsheet=GSHEET_URL, data=df_to_save)
+
+# 데이터 로드
+df = load_data()
 
 # 페이지 와이드 모드 설정
 style.set_page_config(layout="wide")
 style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템 by 박종현")
-
-# 데이터 로드
-df = load_data()
 
 # ---------------------------------------------------------------------------
 # 사이드바: 🆕 특이사항 신규 등록 및 완료 처리 섹션
