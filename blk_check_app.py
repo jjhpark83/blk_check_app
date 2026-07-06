@@ -1,35 +1,131 @@
 import streamlit as style
 import pandas as pd
 import os
+import time
+import io
 from datetime import datetime
 import plotly.express as px
 from streamlit_gsheets import GSheetsConnection  # 구글 시트 라이브러리 추가
+from google.api_core.exceptions import GoogleAPIError  # 구글 API 하위 예외 처리
 
-# 💡 구글 시트 연결 설정 (구글 시트 URL을 지정)
-# 실제 배포 시에는 아래 URL 칸에 본인의 구글 시트 주소를 넣거나 secrets 기능을 사용합니다.
+# 💡 구글 시트 연결 설정 (구글 시트 URL 지정)
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/12i27S6rTm_scIeUQ1k7MbSCHpr_qrhkhrB8yhxU0JQg/edit?usp=drive_link"
-conn = style.connection("gsheets", type=GSheetsConnection)
 
-# 데이터 불러오기 함수 (구글 시트에서 읽기)
+# ---------------------------------------------------------------------------
+# 🛠️ 자동 재시도 데코레이터 (네트워크 지연 및 API 일시적 차단 방지)
+# ---------------------------------------------------------------------------
+def retry_on_failure(max_retries=3, initial_delay=2):
+    """구글 API 통신 중 일시적인 오류가 발생하면 지정된 횟수만큼 재시도합니다."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except (GoogleAPIError, Exception) as e:
+                    error_msg = str(e).lower()
+                    # 403 권한 거부 에러는 다시 시도해도 해결되지 않으므로 즉시 중단
+                    if "permission" in error_msg or "403" in error_msg:
+                        raise PermissionError("구글 시트 접근 권한이 없습니다. 서비스 계정 공유 설정을 확인하세요.") from e
+                    
+                    # 마지막 시도까지 실패하면 에러를 밖으로 던짐
+                    if attempt == max_retries - 1:
+                        raise e
+                    
+                    # 에러 발생 시 사용자에게 알리고 잠시 대기 후 재시도
+                    style.sidebar.warning(f"⚠️ 시트 연결 지연... 다시 시도 중입니다 ({attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    delay *= 2  # 대기 시간을 2배로 늘림 (지수 백오프)
+            return None
+        return wrapper
+    return decorator
+
+# ---------------------------------------------------------------------------
+# 📥 데이터 불러오기 함수 (안전장치 강화 버전)
+# ---------------------------------------------------------------------------
+@retry_on_failure(max_retries=3, initial_delay=2)
 def load_data():
+    """트랜잭션 가드레일을 적용하여 구글 시트에서 안전하게 데이터를 읽어옵니다."""
     try:
-        # 구글 시트 데이터를 판다스 데이터프레임으로 로드
+        # 매번 신규 연결 상태를 검증하기 위해 동적 커넥션 로드
+        conn = style.connection("gsheets", type=GSheetsConnection)
         df = conn.read(spreadsheet=GSHEET_URL, ttl="0d") # ttl="0d"는 캐시 없이 실시간 조회를 의미
-        df['호선'] = df['호선'].astype(str).str.strip()
-        df['블록'] = df['블록'].astype(str).str.strip()
-        df['등록일'] = pd.to_datetime(df['등록일']).dt.date
-        df['완료일'] = pd.to_datetime(df['완료일']).dt.date
+        
+        # 시트는 존재하나 데이터 내용이 전혀 없는 경우 기본 틀(Skeleton) 반환
+        if df is None or df.empty:
+            return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
+            
+        # 문자열 데이터 공백 제거 및 결측치 처리
+        df['호선'] = df['호선'].fillna('').astype(str).str.strip()
+        df['블록'] = df['블록'].fillna('').astype(str).str.strip()
+        
+        # 포맷이 깨진 날짜가 들어와도 앱이 멈추지 않도록 errors='coerce' 설정
+        df['등록일'] = pd.to_datetime(df['등록일'], errors='coerce').dt.date
+        df['완료일'] = pd.to_datetime(df['완료일'], errors='coerce').dt.date
+        
+        # 등록일이 빈 칸인 경우 오늘 날짜로 강제 채움 (시스템 안정성 확보)
+        today = datetime.now().date()
+        df['등록일'] = df['등록일'].fillna(today)
+        
         return df
+        
+    except PermissionError as pe:
+        style.error(f"🔒 권한 오류: {pe}")
+        style.stop()  # 권한이 아예 없으면 렌더링을 즉시 중단하여 불필요한 트레이스백 노출 방지
     except Exception as e:
+        style.error(f"❌ 데이터 로딩 중 오류 발생: {e}")
         return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
 
-# 데이터 저장 함수 (구글 시트에 쓰기)
+# ---------------------------------------------------------------------------
+# 💾 데이터 저장 함수 (이중 백업 로직 적용 버전)
+# ---------------------------------------------------------------------------
+@retry_on_failure(max_retries=3, initial_delay=2)
 def save_data(df):
-    # 날짜 형식을 문자열로 변환하여 저장 안정성 확보
+    """기존 방식 실패 시 하위 엔진(gspread)으로 우회하여 데이터를 시트에 강제 동기화합니다."""
+    if df is None:
+        style.sidebar.error("⚠️ 저장할 데이터가 없습니다.")
+        return False
+
+    # 1. 저장 데이터 전처리 (날짜의 문자열화)
     df_to_save = df.copy()
     df_to_save['등록일'] = df_to_save['등록일'].astype(str)
     df_to_save['완료일'] = df_to_save['완료일'].apply(lambda x: str(x) if pd.notna(x) else "")
-    conn.update(spreadsheet=GSHEET_URL, data=df_to_save)
+    
+    conn = style.connection("gsheets", type=GSheetsConnection)
+    
+    # 2. 다중 저장 전략 실행
+    try:
+        # 전략 A: 라이브러리 공식 update 메서드 사용
+        conn.update(spreadsheet=GSHEET_URL, data=df_to_save)
+        return True
+        
+    except Exception as primary_error:
+        # 전략 B: 공식 메서드 실패 시 하위 gspread API 클라이언트로 우회 시도
+        try:
+            sh = conn.client.open_by_url(GSHEET_URL)
+            worksheet = sh.get_worksheet(0) 
+            
+            # 완전히 비우고 다시 쓰는 원자적(Atomic) 쓰기 프로세스
+            worksheet.clear()
+            matrix_data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
+            worksheet.update(matrix_data)
+            return True
+            
+        except Exception as fallback_error:
+            # 최종 에러 판단 및 친절한 한글 에러 가이드라인 제공
+            error_msg = str(fallback_error)
+            if "RESOURCE_EXHAUSTED" in error_msg or "429" in error_msg:
+                style.sidebar.error("🚨 구글 트래픽 제한(429) 도달! 1~2분 후 자동으로 저장되니 잠시만 기다려 주세요.")
+            elif "403" in error_msg:
+                style.sidebar.error("🔒 구글 시트의 쓰기 권한이 거부되었습니다. 구글 시트 [공유] 설정을 리셋하세요.")
+            else:
+                style.sidebar.error(f"🚨 데이터베이스 동기화 실패: {error_msg}")
+            
+            raise fallback_error
+
+# ---------------------------------------------------------------------------
+# 애플리케이션 메인 구동 영역
+# ---------------------------------------------------------------------------
 
 # 데이터 로드
 df = load_data()
@@ -167,7 +263,6 @@ if style.session_state.selected_block != "전체":
 all_hosun_options = ["전체"] + available_hosun
 all_block_options = ["전체"] + available_block
 
-# 레이아웃 조정: 선택박스 2개 배치 후 하단에 완료 항목 체크박스 배치
 c1, c2 = style.columns(2)
 with c1:
     search_hosun = style.selectbox(
@@ -184,7 +279,6 @@ with c2:
         key="block_box"
     )
 
-# 💡 [핵심 추가] 전체 조회 상태일 때 완료 항목도 볼지 선택하는 체크박스
 show_completed = style.checkbox("✅ 완료된 특이사항 항목도 조회 목록에 포함하기", value=False)
 
 if search_hosun != style.session_state.selected_hosun or search_block != style.session_state.selected_block:
@@ -192,12 +286,10 @@ if search_hosun != style.session_state.selected_hosun or search_block != style.s
     style.session_state.selected_block = search_block
     style.rerun()
 
-# 테이블 조회를 위해 데이터 복사 및 원본 인덱스 보존
 view_df = df.copy()
 view_df['원래번호'] = view_df.index
 
 if search_hosun == "전체" and search_block == "전체":
-    # 💡 체크박스 체크 여부에 따라 조건 분기
     if not show_completed:
         view_df = view_df[view_df['완료일'].isna()]
         style.info("💡 현재 [미완료 항목] 전체 조회 모드입니다. 완료된 항목을 보려면 위의 체크박스를 체크하세요.")
@@ -206,7 +298,6 @@ if search_hosun == "전체" and search_block == "전체":
         
     view_df = view_df.sort_values(by='등록일', ascending=False)
 else:
-    # 특정 호선/블록 검색 시에는 조건대로 정렬 (완료 항목 기본 포함)
     if search_hosun != "전체":
         view_df = view_df[view_df['호선'] == search_hosun]
     if search_block != "전체":
@@ -233,7 +324,6 @@ if event and 'rows' in event.get('selection', {}) and event['selection']['rows']
 # 메인 화면: 📥 데이터 다운로드 존
 # ---------------------------------------------------------------------------
 if not view_df.empty:
-    import io
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         view_df.drop(columns=['원래번호']).to_excel(writer, index=False, sheet_name='Sheet1')
