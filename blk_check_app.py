@@ -79,50 +79,34 @@ def load_data():
 # ---------------------------------------------------------------------------
 # 💾 데이터 저장 함수 (이중 백업 로직 적용 버전)
 # ---------------------------------------------------------------------------
-@retry_on_failure(max_retries=3, initial_delay=2)
 def save_data(df):
-    """기존 방식 실패 시 하위 엔진(gspread)으로 우회하여 데이터를 시트에 강제 동기화합니다."""
     if df is None:
         style.sidebar.error("⚠️ 저장할 데이터가 없습니다.")
         return False
 
-    # 1. 저장 데이터 전처리 (날짜의 문자열화)
+    # 데이터 전처리 (날짜를 문자열로 변환)
     df_to_save = df.copy()
     df_to_save['등록일'] = df_to_save['등록일'].astype(str)
     df_to_save['완료일'] = df_to_save['완료일'].apply(lambda x: str(x) if pd.notna(x) else "")
     
+    # 커넥션 개시
     conn = style.connection("gsheets", type=GSheetsConnection)
     
-    # 2. 다중 저장 전략 실행
     try:
-        # 전략 A: 라이브러리 공식 update 메서드 사용
-        conn.update(spreadsheet=GSHEET_URL, data=df_to_save)
-        return True
+        # 라이브러리 우회: gspread 클라이언트를 직접 제어하여 쓰기 실행
+        sh = conn.client.open_by_url(GSHEET_URL)
+        worksheet = sh.get_worksheet(0) # 첫 번째 탭 선택
         
-    except Exception as primary_error:
-        # 전략 B: 공식 메서드 실패 시 하위 gspread API 클라이언트로 우회 시도
-        try:
-            sh = conn.client.open_by_url(GSHEET_URL)
-            worksheet = sh.get_worksheet(0) 
-            
-            # 완전히 비우고 다시 쓰는 원자적(Atomic) 쓰기 프로세스
-            worksheet.clear()
-            matrix_data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
-            worksheet.update(matrix_data)
-            return True
-            
-        except Exception as fallback_error:
-            # 최종 에러 판단 및 친절한 한글 에러 가이드라인 제공
-            error_msg = str(fallback_error)
-            if "RESOURCE_EXHAUSTED" in error_msg or "429" in error_msg:
-                style.sidebar.error("🚨 구글 트래픽 제한(429) 도달! 1~2분 후 자동으로 저장되니 잠시만 기다려 주세요.")
-            elif "403" in error_msg:
-                style.sidebar.error("🔒 구글 시트의 쓰기 권한이 거부되었습니다. 구글 시트 [공유] 설정을 리셋하세요.")
-            else:
-                style.sidebar.error(f"🚨 데이터베이스 동기화 실패: {error_msg}")
-            
-            raise fallback_error
-
+        worksheet.clear() # 기존 내용 전체 삭제 (중복 방지)
+        
+        # 헤더와 데이터를 리스트 형태로 변환하여 한 번에 기록
+        matrix_data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
+        worksheet.update(matrix_data)
+        return True
+    except Exception as e:
+        style.sidebar.error(f"🚨 데이터베이스 동기화 실패: {e}")
+        style.sidebar.info("구글 시트 [공유] 메뉴에서 서비스 계정이 '편집자'로 추가되었는지 꼭 확인하세요.")
+        return False
 # ---------------------------------------------------------------------------
 # 애플리케이션 메인 구동 영역
 # ---------------------------------------------------------------------------
