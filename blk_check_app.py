@@ -1,122 +1,44 @@
 import streamlit as style
 import pandas as pd
-import os
-import time
-import io
 from datetime import datetime
 import plotly.express as px
-from streamlit_gsheets import GSheetsConnection  # 구글 시트 라이브러리 추가
-from google.api_core.exceptions import GoogleAPIError  # 구글 API 하위 예외 처리
-
-# 💡 구글 시트 연결 설정 (구글 시트 URL 지정)
-GSHEET_URL = "https://docs.google.com/spreadsheets/d/12i27S6rTm_scIeUQ1k7MbSCHpr_qrhkhrB8yhxU0JQg/edit?usp=drive_link"
-
-# ---------------------------------------------------------------------------
-# 🛠️ 자동 재시도 데코레이터 (네트워크 지연 및 API 일시적 차단 방지)
-# ---------------------------------------------------------------------------
-def retry_on_failure(max_retries=3, initial_delay=2):
-    """구글 API 통신 중 일시적인 오류가 발생하면 지정된 횟수만큼 재시도합니다."""
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            delay = initial_delay
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except (GoogleAPIError, Exception) as e:
-                    error_msg = str(e).lower()
-                    # 403 권한 거부 에러는 다시 시도해도 해결되지 않으므로 즉시 중단
-                    if "permission" in error_msg or "403" in error_msg:
-                        raise PermissionError("구글 시트 접근 권한이 없습니다. 서비스 계정 공유 설정을 확인하세요.") from e
-                    
-                    # 마지막 시도까지 실패하면 에러를 밖으로 던짐
-                    if attempt == max_retries - 1:
-                        raise e
-                    
-                    # 에러 발생 시 사용자에게 알리고 잠시 대기 후 재시도
-                    style.sidebar.warning(f"⚠️ 시트 연결 지연... 다시 시도 중입니다 ({attempt + 1}/{max_retries})")
-                    time.sleep(delay)
-                    delay *= 2  # 대기 시간을 2배로 늘림 (지수 백오프)
-            return None
-        return wrapper
-    return decorator
-
-# ---------------------------------------------------------------------------
-# 📥 데이터 불러오기 함수 (안전장치 강화 버전)
-# ---------------------------------------------------------------------------
-@retry_on_failure(max_retries=3, initial_delay=2)
-def load_data():
-    """트랜잭션 가드레일을 적용하여 구글 시트에서 안전하게 데이터를 읽어옵니다."""
-    try:
-        # 매번 신규 연결 상태를 검증하기 위해 동적 커넥션 로드
-        conn = style.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(spreadsheet=GSHEET_URL, ttl="0d") # ttl="0d"는 캐시 없이 실시간 조회를 의미
-        
-        # 시트는 존재하나 데이터 내용이 전혀 없는 경우 기본 틀(Skeleton) 반환
-        if df is None or df.empty:
-            return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
-            
-        # 문자열 데이터 공백 제거 및 결측치 처리
-        df['호선'] = df['호선'].fillna('').astype(str).str.strip()
-        df['블록'] = df['블록'].fillna('').astype(str).str.strip()
-        
-        # 포맷이 깨진 날짜가 들어와도 앱이 멈추지 않도록 errors='coerce' 설정
-        df['등록일'] = pd.to_datetime(df['등록일'], errors='coerce').dt.date
-        df['완료일'] = pd.to_datetime(df['완료일'], errors='coerce').dt.date
-        
-        # 등록일이 빈 칸인 경우 오늘 날짜로 강제 채움 (시스템 안정성 확보)
-        today = datetime.now().date()
-        df['등록일'] = df['등록일'].fillna(today)
-        
-        return df
-        
-    except PermissionError as pe:
-        style.error(f"🔒 권한 오류: {pe}")
-        style.stop()  # 권한이 아예 없으면 렌더링을 즉시 중단하여 불필요한 트레이스백 노출 방지
-    except Exception as e:
-        style.error(f"❌ 데이터 로딩 중 오류 발생: {e}")
-        return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
-
-# ---------------------------------------------------------------------------
-# 💾 데이터 저장 함수 (이중 백업 로직 적용 버전)
-# ---------------------------------------------------------------------------
-def save_data(df):
-    if df is None:
-        style.sidebar.error("⚠️ 저장할 데이터가 없습니다.")
-        return False
-
-    # 데이터 전처리 (날짜를 문자열로 변환)
-    df_to_save = df.copy()
-    df_to_save['등록일'] = df_to_save['등록일'].astype(str)
-    df_to_save['완료일'] = df_to_save['완료일'].apply(lambda x: str(x) if pd.notna(x) else "")
-    
-    # 커넥션 개시
-    conn = style.connection("gsheets", type=GSheetsConnection)
-    
-    try:
-        # 라이브러리 우회: gspread 클라이언트를 직접 제어하여 쓰기 실행
-        sh = conn.client.open_by_url(GSHEET_URL)
-        worksheet = sh.get_worksheet(0) # 첫 번째 탭 선택
-        
-        worksheet.clear() # 기존 내용 전체 삭제 (중복 방지)
-        
-        # 헤더와 데이터를 리스트 형태로 변환하여 한 번에 기록
-        matrix_data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
-        worksheet.update(matrix_data)
-        return True
-    except Exception as e:
-        style.sidebar.error(f"🚨 데이터베이스 동기화 실패: {e}")
-        style.sidebar.info("구글 시트 [공유] 메뉴에서 서비스 계정이 '편집자'로 추가되었는지 꼭 확인하세요.")
-        return False
-# ---------------------------------------------------------------------------
-# 애플리케이션 메인 구동 영역
-# ---------------------------------------------------------------------------
-
-# 데이터 로드
-df = load_data()
+from streamlit_gsheets import GSheetsConnection  # 💡 구글 시트 연동 라이브러리 추가
 
 # 페이지 와이드 모드 설정
 style.set_page_config(layout="wide")
-style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템 by 박종현")
+style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템")
+
+# 💡 [구글 시트 연동 적용] 데이터 불러오기 함수
+def load_data_from_sheets():
+    try:
+        # st.connection을 이용해 secrets.toml에 정의된 구글 시트에 연결합니다.
+        # ttl=10 옵션은 모바일 현장 확인을 고려하여 10초마다 데이터를 새로고침하도록 설정합니다.
+        conn = style.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(ttl=10)
+        
+        # 데이터가 비어있는 경우 기본 컬럼 세팅
+        if df.empty:
+            return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
+            
+        df['호선'] = df['호선'].astype(str).str.strip()
+        df['블록'] = df['블록'].astype(str).str.strip()
+        
+        # 날짜 형식 안전하게 변환
+        df['등록일'] = pd.to_datetime(df['등록일']).dt.date
+        df['완료일'] = pd.to_datetime(df['완료일']).dt.date
+        return df
+    except Exception as e:
+        # 데이터가 아예 없거나 구글 시트가 비어있을 때 에러 방지용 기본 프레임 생성
+        return pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
+
+# 💡 [구글 시트 연동 적용] 데이터 저장 함수
+def save_data_to_sheets(df):
+    conn = style.connection("gsheets", type=GSheetsConnection)
+    # 구글 시트에 데이터프레임 전체를 업데이트(덮어쓰기)합니다.
+    conn.update(data=df)
+
+# 데이터 로드 (구글 시트로부터 실시간 load)
+df = load_data_from_sheets()
 
 # ---------------------------------------------------------------------------
 # 사이드바: 🆕 특이사항 신규 등록 및 완료 처리 섹션
@@ -192,7 +114,8 @@ if submit_btn:
             df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
             style.sidebar.success("🎉 신규 특이사항 등록 완료!")
             
-        save_data(df)
+        # 💡 로컬 엑셀 대신 구글 시트에 최종 저장
+        save_data_to_sheets(df)
         style.rerun()
     else:
         style.sidebar.error("⚠️ 호선, 블록, 세부내용은 필수 입력 사항입니다.")
@@ -204,8 +127,10 @@ style.subheader("📊 실시간 공정 현황 통계")
 if not df.empty:
     col1, col2 = style.columns(2)
     
+    # 1. 미완료 데이터 미리 필터링
+    uncompleted_df = df[df['완료일'].isna()]
+    
     with col1:
-        uncompleted_df = df[df['완료일'].isna()]
         if not uncompleted_df.empty:
             process_counts = uncompleted_df['공정'].value_counts().reset_index()
             process_counts.columns = ['공정', '미완료 건수']
@@ -215,11 +140,15 @@ if not df.empty:
             style.info("현재 미완료된 특이사항이 없습니다.")
             
     with col2:
-        if '호선' in df.columns and not df.empty:
-            hosun_counts = df['호선'].value_counts().reset_index()
-            hosun_counts.columns = ['호선', '등록 건수']
-            fig2 = px.pie(hosun_counts, values='등록 건수', names='호선', title="🚢 호선별 누적 특이사항 비중", hole=0.3)
+        if '호선' in df.columns and not uncompleted_df.empty:
+            hosun_counts = uncompleted_df['호선'].value_counts().reset_index()
+            hosun_counts.columns = ['호선', '미완료 건수']
+            fig2 = px.pie(hosun_counts, values='미완료 건수', names='호선', title="🚢 호선별 미완료 특이사항 비중", hole=0.3)
             style.plotly_chart(fig2, use_container_width=True)
+        elif uncompleted_df.empty:
+            style.info("현재 미완료된 특이사항이 없습니다.")
+        else:
+            style.info("'호선' 컬럼을 찾을 수 없습니다.")
 else:
     style.info("통계를 표시할 데이터가 아직 없습니다.")
 
@@ -308,6 +237,7 @@ if event and 'rows' in event.get('selection', {}) and event['selection']['rows']
 # 메인 화면: 📥 데이터 다운로드 존
 # ---------------------------------------------------------------------------
 if not view_df.empty:
+    import io
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         view_df.drop(columns=['원래번호']).to_excel(writer, index=False, sheet_name='Sheet1')
