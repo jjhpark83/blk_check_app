@@ -64,42 +64,23 @@ def load_data_from_sheets():
         style.error(f"❌ 구글 드라이브 실시간 자료 로드 실패: {e}")
         return fallback_df
 
-def save_data_to_sheets(df):
+def save_data_to_sheets(payload_data):
     """
-    구글 Apps Script 웹앱 API를 활용하여, 라이브러리 충돌 없이 
-    실제 구글 드라이브 스프레드시트에 데이터를 실시간 누적 저장합니다.
+    구글 웹앱 API로 방금 입력/수정한 한 줄의 데이터를 
+    실제 구글 드라이브 스프레드시트에 즉시 물리적으로 전송(Write)합니다.
     """
     try:
-        # 가장 최근에 추가된 마지막 행(신규 데이터) 추출
-        if not df.empty:
-            last_row = df.iloc[-1]
+        if "여기에_본인의_웹앱" in GOOGLE_WEBAPP_URL or not GOOGLE_WEBAPP_URL:
+            return False
             
-            # 구글 시트로 보낼 데이터 포맷 빌드
-            payload = {
-                "hosun": str(last_row['호선']),
-                "block": str(last_row['블록']),
-                "process": str(last_row['공정']),
-                "content": str(last_row['세부내용']),
-                "reg_date": str(last_row['등록일']),
-                "comp_date": str(last_row['완료일']) if pd.notna(last_row['완료일']) else "",
-                "worker": str(last_row['담당자'])
-            }
-            
-            # 구글 웹앱 주소로 데이터 전송 (API 호출)
-            if "여기에_본인의_웹앱" not in GOOGLE_WEBAPP_URL:
-                response = requests.post(GOOGLE_WEBAPP_URL, json=payload)
-                if response.status_code == 200:
-                    # 화면 세션 상태에도 동기화 유지
-                    style.session_state.live_data = df
-                    return True
-        
-        # 주소 설정이 안 되었을 때는 화면 로컬 세션에만 반영
-        style.session_state.live_data = df
-        return True
+        # 구글 Apps Script로 데이터 POST 전송
+        response = requests.post(GOOGLE_WEBAPP_URL, json=payload_data, timeout=5)
+        if response.status_code == 200:
+            return True
+        return False
     except Exception as e:
-        style.sidebar.error(f"❌ 구글 시트 전송 실패 (화면에만 임시 저장됨): {e}")
-        style.session_state.live_data = df
-        return True
+        style.sidebar.error(f"🌐 구글 전송 오류: {e}")
+        return False
 
 # 🚨 세션 스테이트를 활용하여 실시간 추가/수정 데이터 보존 데이터베이스 구축
 if 'live_data' not in style.session_state:
@@ -168,38 +149,37 @@ if style.session_state.edit_index is not None:
 
 if submit_btn:
     if input_hosun and input_block and input_content:
-        if style.session_state.edit_index is not None:
-            # 기존 데이터 수정 적용
-            df.loc[style.session_state.edit_index, '호선'] = input_hosun.strip()
-            df.loc[style.session_state.edit_index, '블록'] = input_block.strip()
-            df.loc[style.session_state.edit_index, '공정'] = input_process.strip()
-            df.loc[style.session_state.edit_index, '세부내용'] = input_content
-            df.loc[style.session_state.edit_index, '등록일'] = input_reg_date
-            df.loc[style.session_state.edit_index, '완료일'] = input_comp_date if is_completed else ""
-            df.loc[style.session_state.edit_index, '담당자'] = input_worker
-            
-            if save_data_to_sheets(df):
-                style.sidebar.success("💾 수정한 내용이 대시보드에 실시간 반영되었습니다!")
+        # 💡 구글 시트로 보낼 한 줄 데이터 패키지 만들기
+        payload = {
+            "hosun": input_hosun.strip(),
+            "block": input_block.strip(),
+            "process": input_process.strip(),
+            "content": input_content,
+            "reg_date": str(input_reg_date),
+            "comp_date": str(input_comp_date) if is_completed else "",
+            "worker": input_worker.strip()
+        }
+        
+        # 실제 구글 드라이브 시트에 한 줄 밀어넣기 시도!
+        success = save_data_to_sheets(payload)
+        
+        if success:
+            # 구글 시트 저장 성공 시 화면 대시보드 데이터프레임 갱신
+            if style.session_state.edit_index is not None:
+                df.loc[style.session_state.edit_index] = [input_hosun.strip(), input_block.strip(), input_process.strip(), input_content, input_reg_date, input_comp_date if is_completed else "", input_worker.strip()]
+                style.sidebar.success("💾 구글 스프레드시트 파일 수정 완료!")
                 style.session_state.edit_index = None
-                style.rerun()
+            else:
+                new_row = pd.DataFrame([[input_hosun.strip(), input_block.strip(), input_process.strip(), input_content, input_reg_date, input_comp_date if is_completed else "", input_worker.strip()]], columns=df.columns)
+                df = pd.concat([df, new_row], ignore_index=True)
+                style.sidebar.success("🎉 구글 스프레드시트 파일 신규 등록 완료!")
+            
+            style.session_state.live_data = df
+            style.rerun()
         else:
-            # 신규 데이터 추가 생성
-            new_data = {
-                '호선': input_hosun.strip(),
-                '블록': input_block.strip(),
-                '공정': input_process.strip(),
-                '세부내용': input_content,
-                '등록일': input_reg_date,
-                '완료일': input_comp_date if is_completed else "",
-                '담당자': input_worker
-            }
-            df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-            if save_data_to_sheets(df):
-                style.sidebar.success("🎉 신규 특이사항이 성공적으로 등록되었습니다!")
-                style.rerun()
+            style.sidebar.error("❌ 구글 웹앱 연결 실패! URL 주소나 배포 버전을 확인하세요.")
     else:
         style.sidebar.error("⚠️ 호선, 블록, 세부내용은 필수 입력 사항입니다.")
-
 # ===========================================================================
 # 4. 메인 화면: 📊 통계 그래프 존
 # ===========================================================================
