@@ -12,7 +12,7 @@ import requests
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/12i27S6rTm_scIeUQ1k7MbSCHpr_qrhkhrB8yhxU0JQg/edit?usp=sharing"
 
 # 🔗 [★여기에 아까 복사한 구글 웹앱 URL 주소를 붙여넣으세요★]
-GOOGLE_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzRuaayPJrl-gHYRE9fJbmrbtKlucciupcjqP7taGjCOdTe79gc4dXBnrSDBVnot6ijhQ/exec"
+GOOGLE_WEBAPP_URL = "https://script.google.com/macros/library/d/1m6P55rm2mYBJS5NYHSCpFQBMefm_lAqAbuELa8xujRdHhh398_ug0DdF/2"
 
 
 # 페이지 와이드 모드 설정
