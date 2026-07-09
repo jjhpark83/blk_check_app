@@ -6,7 +6,7 @@ from streamlit_gsheets import GSheetsConnection  # 💡 구글 시트 연동 라
 
 # 페이지 와이드 모드 설정
 style.set_page_config(layout="wide")
-style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템")
+style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템 by 박종현")
 
 # 💡 [구글 시트 연동 적용] 데이터 불러오기 함수
 def load_data_from_sheets():
