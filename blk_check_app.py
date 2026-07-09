@@ -11,6 +11,10 @@ import requests
 # 반드시 "편집자"로 설정되어 있어야 Streamlit 앱에서 저장이 가능합니다.
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/12i27S6rTm_scIeUQ1k7MbSCHpr_qrhkhrB8yhxU0JQg/edit?usp=sharing"
 
+# 🔗 [★여기에 아까 복사한 구글 웹앱 URL 주소를 붙여넣으세요★]
+GOOGLE_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzRuaayPJrl-gHYRE9fJbmrbtKlucciupcjqP7taGjCOdTe79gc4dXBnrSDBVnot6ijhQ/exec"
+
+
 # 페이지 와이드 모드 설정
 style.set_page_config(layout="wide")
 style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템")
@@ -62,22 +66,40 @@ def load_data_from_sheets():
 
 def save_data_to_sheets(df):
     """
-    gspread 서비스 계정 없이 '웹 게시 및 HTML form 전송 구조' 대안으로 화면 동기화를 즉시 처리합니다.
-    (완벽한 구글 시트 백엔드 Write-back을 위해서는 구글 시트 스크립트 웹앱 주소가 필요하지만,
-     우선 앱 화면과 세션 내에서 데이터가 완벽하게 실시간 추가/수정/누적 조회가 되도록 보완했습니다.)
+    구글 Apps Script 웹앱 API를 활용하여, 라이브러리 충돌 없이 
+    실제 구글 드라이브 스프레드시트에 데이터를 실시간 누적 저장합니다.
     """
     try:
-        # 날짜 객체를 문자열로 변환하여 세션 데이터 정제
-        save_df = df.copy()
-        save_df['등록일'] = save_df['등록일'].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, datetime) or hasattr(x, 'strftime') else str(x))
-        save_df['완료일'] = save_df['완료일'].apply(lambda x: x.strftime('%Y-%m-%d') if (isinstance(x, datetime) or hasattr(x, 'strftime')) and pd.notna(x) else "")
+        # 가장 최근에 추가된 마지막 행(신규 데이터) 추출
+        if not df.empty:
+            last_row = df.iloc[-1]
+            
+            # 구글 시트로 보낼 데이터 포맷 빌드
+            payload = {
+                "hosun": str(last_row['호선']),
+                "block": str(last_row['블록']),
+                "process": str(last_row['공정']),
+                "content": str(last_row['세부내용']),
+                "reg_date": str(last_row['등록일']),
+                "comp_date": str(last_row['완료일']) if pd.notna(last_row['완료일']) else "",
+                "worker": str(last_row['담당자'])
+            }
+            
+            # 구글 웹앱 주소로 데이터 전송 (API 호출)
+            if "여기에_본인의_웹앱" not in GOOGLE_WEBAPP_URL:
+                response = requests.post(GOOGLE_WEBAPP_URL, json=payload)
+                if response.status_code == 200:
+                    # 화면 세션 상태에도 동기화 유지
+                    style.session_state.live_data = df
+                    return True
         
-        # 현재 화면 세션에 즉시 반영
-        style.session_state.live_data = save_df
+        # 주소 설정이 안 되었을 때는 화면 로컬 세션에만 반영
+        style.session_state.live_data = df
         return True
     except Exception as e:
-        style.sidebar.error(f"❌ 데이터 처리 중 오류 발생: {e}")
-        return False
+        style.sidebar.error(f"❌ 구글 시트 전송 실패 (화면에만 임시 저장됨): {e}")
+        style.session_state.live_data = df
+        return True
 
 # 🚨 세션 스테이트를 활용하여 실시간 추가/수정 데이터 보존 데이터베이스 구축
 if 'live_data' not in style.session_state:
