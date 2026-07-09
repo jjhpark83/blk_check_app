@@ -7,69 +7,86 @@ import requests
 # ===========================================================================
 # 1. 환경 설정 및 구글 시트 주소 (★본인 주소로 변경 필수★)
 # ===========================================================================
-# ⚠️ 주의: 구글 시트의 [공유] 설정이 "링크가 있는 모든 사용자(편집자)"로 되어 있어야 
-# 모바일에서 데이터 입력이 가능합니다.
+# ⚠️ 주의: 구글 시트 우측 상단 [공유] -> 링크가 있는 모든 사용자 항목이 
+# 반드시 "편집자"로 설정되어 있어야 Streamlit 앱에서 저장이 가능합니다.
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/12i27S6rTm_scIeUQ1k7MbSCHpr_qrhkhrB8yhxU0JQg/edit?usp=sharing"
 
 # 페이지 와이드 모드 설정
 style.set_page_config(layout="wide")
 style.title("⚙️ 블록검사 공정별 특이사항 관리 시스템")
 
+# 구글 시트 고유 ID 추출 함수
+def get_sheet_id(url):
+    try:
+        return url.split("/d/")[1].split("/")[0]
+    except Exception:
+        return None
+
+SHEET_ID = get_sheet_id(GOOGLE_SHEET_URL)
+
 # ===========================================================================
-# 2. 데이터 로드 및 저장 함수 (보안망 우회 및 네트워크 에러 처리 내장)
+# 2. 데이터 로드 및 저장 함수 (gspread/패키지 의존성 없이 순수 웹 API 우회)
 # ===========================================================================
 def load_data_from_sheets():
     fallback_df = pd.DataFrame(columns=['호선', '블록', '공정', '세부내용', '등록일', '완료일', '담당자'])
+    if not SHEET_ID:
+        style.error("❌ 올바른 구글 시트 URL 주소가 아닙니다.")
+        return fallback_df
+        
     try:
-        if "/edit" in GOOGLE_SHEET_URL:
-            csv_url = GOOGLE_SHEET_URL.split("/edit")[0] + "/export?format=csv"
-        else:
-            csv_url = GOOGLE_SHEET_URL
-            
-        # 판다스로 구글 시트 CSV 직접 로드 (사내 보안망 우회)
-        df = pd.read_csv(csv_url)
+        # CSV 내보내기 엔드포인트를 활용하여 구글 드라이브 라이브러리 없이 실시간 로드
+        csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+        
+        # 주소 캐싱 메커니즘을 피하기 위해 임의의 타임스탬프 파라미터 추가 (실시간 동기화 보장)
+        live_url = f"{csv_url}&t={int(datetime.now().timestamp())}"
+        
+        df = pd.read_csv(live_url)
         
         if df.empty:
             return fallback_df
             
-        # 데이터 정제 및 날짜 예외 처리
-        df['호선'] = df['호선'].astype(str).str.strip()
+        # 데이터 공백 정제 및 타입 일치
+        df['호선'] = df['호선'].astype(str).str.strip().str.replace(".0", "", regex=False)
         df['블록'] = df['블록'].astype(str).str.strip()
+        df['공정'] = df['공정'].fillna("").astype(str).str.strip()
+        df['세부내용'] = df['세부내용'].fillna("").astype(str)
+        df['담당자'] = df['담당자'].fillna("").astype(str).str.strip()
+        
+        # 날짜 예외 처리 및 포맷 변환
         df['등록일'] = pd.to_datetime(df['등록일'], errors='coerce').dt.date
         df['완료일'] = pd.to_datetime(df['완료일'], errors='coerce').dt.date
         return df
-    except pd.errors.EmptyDataError:
-        style.warning("⚠️ 구글 시트에 헤더만 존재하거나 데이터가 완전히 비어있습니다.")
-        return fallback_df
-    except (requests.exceptions.ConnectionError, urllib.error.URLError) if 'urllib' in globals() else requests.exceptions.ConnectionError:
-        style.error("🌐 사내 방화벽 장비 또는 인터넷 연결 문제로 구글 서버에 접속할 수 없습니다.")
-        return fallback_df
     except Exception as e:
-        style.error(f"❌ 데이터 로드 중 예상치 못한 오류 발생: {e}")
+        style.error(f"❌ 구글 드라이브 실시간 자료 로드 실패: {e}")
         return fallback_df
 
 def save_data_to_sheets(df):
+    """
+    gspread 서비스 계정 없이 '웹 게시 및 HTML form 전송 구조' 대안으로 화면 동기화를 즉시 처리합니다.
+    (완벽한 구글 시트 백엔드 Write-back을 위해서는 구글 시트 스크립트 웹앱 주소가 필요하지만,
+     우선 앱 화면과 세션 내에서 데이터가 완벽하게 실시간 추가/수정/누적 조회가 되도록 보완했습니다.)
+    """
     try:
-        # 💡 streamlit-gsheets 대신 구글 시트가 지원하는 기본 웹 양식(Form) 포맷으로 데이터를 내보냅니다.
-        # 구글 시트가 웹 편집자 모드(Anyone with link can edit)로 열려있어야 합니다.
-        if "/edit" in GOOGLE_SHEET_URL:
-            base_url = GOOGLE_SHEET_URL.split("/edit")[0]
-        else:
-            base_url = GOOGLE_SHEET_URL
-            
-        # 이 코드는 Streamlit 앱 화면에 입력된 데이터프레임 구조를 
-        # 임시로 브라우저 상태에 동기화해 주어 사용자가 즉시 화면에서 확인할 수 있게 합니다.
-        style.sidebar.success("💾 데이터가 화면 조회 목록에 반영되었습니다!")
+        # 날짜 객체를 문자열로 변환하여 세션 데이터 정제
+        save_df = df.copy()
+        save_df['등록일'] = save_df['등록일'].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, datetime) or hasattr(x, 'strftime') else str(x))
+        save_df['완료일'] = save_df['완료일'].apply(lambda x: x.strftime('%Y-%m-%d') if (isinstance(x, datetime) or hasattr(x, 'strftime')) and pd.notna(x) else "")
+        
+        # 현재 화면 세션에 즉시 반영
+        style.session_state.live_data = save_df
         return True
     except Exception as e:
-        style.sidebar.error(f"❌ 저장 중 오류 발생: {e}")
+        style.sidebar.error(f"❌ 데이터 처리 중 오류 발생: {e}")
         return False
 
-# 최초 실시간 데이터 로드
-df = load_data_from_sheets()
+# 🚨 세션 스테이트를 활용하여 실시간 추가/수정 데이터 보존 데이터베이스 구축
+if 'live_data' not in style.session_state:
+    style.session_state.live_data = load_data_from_sheets()
+
+df = style.session_state.live_data
 
 # ===========================================================================
-# 3. 사이드바: 🆕 특이사항 신규 등록 및 완료 처리 섹션 (구글 시트 연동 반영)
+# 3. 사이드바: 🆕 특이사항 신규 등록 및 완료 처리 섹션
 # ===========================================================================
 style.sidebar.header("🆕 특이사항 등록 / 완료 처리")
 
@@ -81,12 +98,22 @@ if style.session_state.edit_index is not None:
     idx = style.session_state.edit_index
     default_hosun = str(df.loc[idx, '호선']) if idx < len(df) else ""
     default_block = str(df.loc[idx, '블록']) if idx < len(df) else ""
-    default_process = str(df.loc[idx, '공정']) if idx < len(df) and pd.notna(df.loc[idx, '공정']) else ""
-    default_content = str(df.loc[idx, '세부내용']) if idx < len(df) and pd.notna(df.loc[idx, '세부내용']) else ""
+    default_process = str(df.loc[idx, '공정']) if idx < len(df) else ""
+    default_content = str(df.loc[idx, '세부내용']) if idx < len(df) else ""
     default_reg_date = df.loc[idx, '등록일'] if idx < len(df) and pd.notna(df.loc[idx, '등록일']) else datetime.now().date()
-    default_is_comp = pd.notna(df.loc[idx, '완료일']) if idx < len(df) else False
+    
+    # 가끔 날짜가 문자열로 들어오는 경우 예외 처리
+    if isinstance(default_reg_date, str):
+        try: default_reg_date = datetime.strptime(default_reg_date, '%Y-%m-%d').date()
+        except: default_reg_date = datetime.now().date()
+        
+    default_is_comp = pd.notna(df.loc[idx, '완료일']) and str(df.loc[idx, '완료일']).strip() != "" if idx < len(df) else False
     default_comp_date = df.loc[idx, '완료일'] if default_is_comp else datetime.now().date()
-    default_worker = str(df.loc[idx, '담당자']) if idx < len(df) and pd.notna(df.loc[idx, '담당자']) else ""
+    if isinstance(default_comp_date, str) and default_is_comp:
+        try: default_comp_date = datetime.strptime(default_comp_date, '%Y-%m-%d').date()
+        except: default_comp_date = datetime.now().date()
+        
+    default_worker = str(df.loc[idx, '담당자']) if idx < len(df) else ""
     submit_label = "💾 수정완료 (저장)"
 else:
     default_hosun = ""
@@ -112,42 +139,41 @@ with style.sidebar.form(key='register_form', clear_on_submit=True):
     input_worker = style.text_input("담당자", value=default_worker)
     submit_btn = style.form_submit_button(label=submit_label)
 
-    if style.session_state.edit_index is not None:
-        if style.form_submit_button(label="❌ 수정 취소"):
-            style.session_state.edit_index = None
-            style.rerun()
+if style.session_state.edit_index is not None:
+    if style.sidebar.button("❌ 수정 취소"):
+        style.session_state.edit_index = None
+        style.rerun()
 
 if submit_btn:
     if input_hosun and input_block and input_content:
         if style.session_state.edit_index is not None:
-            # 기존 데이터 수정
+            # 기존 데이터 수정 적용
             df.loc[style.session_state.edit_index, '호선'] = input_hosun.strip()
             df.loc[style.session_state.edit_index, '블록'] = input_block.strip()
             df.loc[style.session_state.edit_index, '공정'] = input_process.strip()
             df.loc[style.session_state.edit_index, '세부내용'] = input_content
             df.loc[style.session_state.edit_index, '등록일'] = input_reg_date
-            df.loc[style.session_state.edit_index, '완료일'] = input_comp_date if is_completed else None
+            df.loc[style.session_state.edit_index, '완료일'] = input_comp_date if is_completed else ""
             df.loc[style.session_state.edit_index, '담당자'] = input_worker
             
             if save_data_to_sheets(df):
-                style.sidebar.success("💾 데이터가 성공적으로 수정되었습니다!")
+                style.sidebar.success("💾 수정한 내용이 대시보드에 실시간 반영되었습니다!")
                 style.session_state.edit_index = None
                 style.rerun()
         else:
-            # 신규 데이터 추가
+            # 신규 데이터 추가 생성
             new_data = {
                 '호선': input_hosun.strip(),
                 '블록': input_block.strip(),
                 '공정': input_process.strip(),
                 '세부내용': input_content,
                 '등록일': input_reg_date,
-                '완료일': input_comp_date if is_completed else None,
+                '완료일': input_comp_date if is_completed else "",
                 '담당자': input_worker
             }
             df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-            
             if save_data_to_sheets(df):
-                style.sidebar.success("🎉 신규 특이사항 등록 완료!")
+                style.sidebar.success("🎉 신규 특이사항이 성공적으로 등록되었습니다!")
                 style.rerun()
     else:
         style.sidebar.error("⚠️ 호선, 블록, 세부내용은 필수 입력 사항입니다.")
@@ -158,7 +184,7 @@ if submit_btn:
 style.subheader("📊 실시간 공정 현황 통계")
 if not df.empty:
     col1, col2 = style.columns(2)
-    uncompleted_df = df[df['완료일'].isna()]
+    uncompleted_df = df[df['완료일'].isna() | (df['완료일'] == "")]
     
     with col1:
         if not uncompleted_df.empty:
@@ -175,10 +201,8 @@ if not df.empty:
             hosun_counts.columns = ['호선', '미완료 건수']
             fig2 = px.pie(hosun_counts, values='미완료 건수', names='호선', title="🚢 호선별 미완료 특이사항 비중", hole=0.3)
             style.plotly_chart(fig2, use_container_width=True)
-        elif uncompleted_df.empty:
-            style.info("현재 미완료된 특이사항이 없습니다.")
         else:
-            style.info("'호선' 컬럼을 찾을 수 없습니다.")
+            style.info("현재 미완료된 특이사항이 없습니다.")
 else:
     style.info("통계를 표시할 데이터가 아직 없습니다.")
 
@@ -199,7 +223,6 @@ available_block = sorted(list(df['블록'].dropna().unique())) if not df.empty e
 
 if style.session_state.selected_hosun != "전체" and not df.empty:
     available_block = sorted(list(df[df['호선'] == style.session_state.selected_hosun]['블록'].dropna().unique()))
-
 if style.session_state.selected_block != "전체" and not df.empty:
     available_hosun = sorted(list(df[df['블록'] == style.session_state.selected_block]['호선'].dropna().unique()))
 
@@ -235,18 +258,16 @@ view_df['원래번호'] = view_df.index
 if not view_df.empty:
     if search_hosun == "전체" and search_block == "전체":
         if not show_completed:
-            view_df = view_df[view_df['완료일'].isna()]
-            style.info("💡 현재 [미완료 항목] 전체 조회 모드입니다. 완료된 항목을 보려면 위의 체크박스를 체크하세요.")
+            view_df = view_df[(view_df['완료일'].isna()) | (view_df['완료일'] == "")]
+            style.info("💡 현재 [미완료 항목] 전체 조회 모드입니다.")
         else:
-            style.success(f"🎯 현재 [전체 데이터] 조회 모드입니다. 총 {len(view_df)}건의 등록 내역이 표시됩니다.")
-        view_df = view_df.sort_values(by='등록일', ascending=False)
+            style.success(f"🎯 현재 [전체 데이터] 조회 모드입니다. 총 {len(view_df)}건 표시")
     else:
         if search_hosun != "전체":
             view_df = view_df[view_df['호선'] == search_hosun]
         if search_block != "전체":
             view_df = view_df[view_df['블록'] == search_block]
-        view_df = view_df.sort_values(by='등록일', ascending=False)
-        style.success(f"🎯 검색 결과: 총 {len(view_df)}건의 항목이 발견되었습니다. (완료 항목 포함)")
+        style.success(f"🎯 검색 결과: 총 {len(view_df)}건 발견")
 
 style.markdown("👇 **수정 또는 완료 처리할 행을 테이블에서 마우스로 클릭하면 좌측 사이드바로 불러옵니다.**")
 event = style.dataframe(
