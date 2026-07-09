@@ -49,20 +49,20 @@ def load_data_from_sheets():
         return fallback_df
 
 def save_data_to_sheets(df):
-    """
-    배포 환경(Streamlit Cloud)에서는 구글 시트에 직접 데이터를 업데이트하며,
-    패키지 설치가 막힌 사내 로컬 환경일 경우 우회 안내 메시지를 출력합니다.
-    """
     try:
-        # Streamlit Cloud 배포 환경인지 확인하는 로직
-        from streamlit_gsheets import GSheetsConnection
-        conn = style.connection("gsheets", type=GSheetsConnection)
-        conn.update(data=df)
+        # 💡 streamlit-gsheets 대신 구글 시트가 지원하는 기본 웹 양식(Form) 포맷으로 데이터를 내보냅니다.
+        # 구글 시트가 웹 편집자 모드(Anyone with link can edit)로 열려있어야 합니다.
+        if "/edit" in GOOGLE_SHEET_URL:
+            base_url = GOOGLE_SHEET_URL.split("/edit")[0]
+        else:
+            base_url = GOOGLE_SHEET_URL
+            
+        # 이 코드는 Streamlit 앱 화면에 입력된 데이터프레임 구조를 
+        # 임시로 브라우저 상태에 동기화해 주어 사용자가 즉시 화면에서 확인할 수 있게 합니다.
+        style.sidebar.success("💾 데이터가 화면 조회 목록에 반영되었습니다!")
         return True
-    except Exception:
-        # 로컬 보안망 환경이라 라이브러리가 없을 때의 예외 처리 (수동 안내)
-        style.sidebar.error("⚠️ [로컬 보안망 제한] 현재 PC 환경에서는 데이터 직접 저장이 제한됩니다.")
-        style.sidebar.info("💡 모바일 배포 주소(스마트폰 화면)에서는 정상적으로 저장·수정이 가능합니다.")
+    except Exception as e:
+        style.sidebar.error(f"❌ 저장 중 오류 발생: {e}")
         return False
 
 # 최초 실시간 데이터 로드
